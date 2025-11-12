@@ -744,75 +744,83 @@ async def get_plot_info_with_dates(plot_name: str):
 @app.post("/analyze_Growth", response_model=Dict[str, Any])
 async def analyze_plot_combined(
     plot_name: str = Query(..., description="Name of the plot to analyze"),
-    end_date: str = Query(default=date.today().strftime("%Y-%m-%d"), description="End date for analysis"),
+    end_date: str = Query(
+        default_factory=lambda: date.today().strftime("%Y-%m-%d"),
+        description="End date for analysis (defaults to today's date)"
+    ),
     start_date: str = Depends(default_start_date)
 ):
     """
-    Analyze plot growth using latest Sentinel-1 VH or Sentinel-2 NDVI (Sentinel-2 preferred if same date)
+    Analyze plot growth using Sentinel-1 VH or Sentinel-2 NDVI.
+    Sentinel-2 is preferred if both datasets are available.
     """
     if plot_name not in plot_dict:
         raise HTTPException(status_code=404, detail="Plot not found")
-   
+
     try:
         plot_data = plot_dict[plot_name]
         geometry = plot_data["geometry"]
         area_hectares = geometry.area().divide(10000).getInfo()
- 
-        today = ee.Date(end_date)
-        analysis_end = today
+
         analysis_start = ee.Date(start_date)
- 
-        # -------------------- SENTINEL-1 VH --------------------
+        analysis_end = ee.Date(end_date)
+
+        # -------------------- SENTINEL-2 --------------------
+        s2_collection = (
+            ee.ImageCollection("COPERNICUS/S2_SR")
+            .filterBounds(geometry)
+            .filterDate(analysis_start, analysis_end)
+            .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 60))
+            .map(lambda img: img.clip(geometry))
+            .sort("system:time_start", False)
+        )
+
+        s2_count = s2_collection.size().getInfo()
+        latest_s2_image = None
+        latest_s2_date = None
+        if s2_count > 0:
+            latest_s2_image = ee.Image(s2_collection.first())
+            latest_s2_date = ee.Date(latest_s2_image.get("system:time_start"))
+
+        # -------------------- SENTINEL-1 --------------------
         s1_collection = (
             ee.ImageCollection("COPERNICUS/S1_GRD")
             .filterBounds(geometry)
             .filterDate(analysis_start, analysis_end)
             .filter(ee.Filter.eq("instrumentMode", "IW"))
+            .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VH"))
             .select(["VH"])
             .map(lambda img: img.clip(geometry))
-            .sort('SYSTEM:TIME_START', False)
+            .sort("system:time_start", False)
         )
- 
-        s1_size = s1_collection.size().getInfo()
-        latest_s1_date = None
+
+        s1_count = s1_collection.size().getInfo()
         latest_s1_image = None
-        if s1_size > 0:
+        previous_s1_image = None
+        latest_s1_date = None
+        if s1_count >= 2:
+            latest_s1_image = ee.Image(s1_collection.toList(2).get(0))
+            previous_s1_image = ee.Image(s1_collection.toList(2).get(1))
+            latest_s1_date = ee.Date(latest_s1_image.get("system:time_start"))
+        elif s1_count == 1:
             latest_s1_image = ee.Image(s1_collection.first())
-            latest_s1_date = ee.Date(latest_s1_image.get('system:time_start')).format('YYYY-MM-dd').getInfo()
- 
-        # -------------------- SENTINEL-2 NDVI --------------------
-        s2_collection = (
-            ee.ImageCollection("COPERNICUS/S2_SR")
-            .filterBounds(geometry)
-            .filterDate(analysis_start, analysis_end)
-            .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 60))
-            .map(lambda img: img.clip(geometry))
-            .sort('SYSTEM:TIME_START', False)
-        )
- 
-        s2_size = s2_collection.size().getInfo()
-        latest_s2_date = None
-        latest_s2_image = None
-        if s2_size > 0:
-            latest_s2_image = ee.Image(s2_collection.first())
-            latest_s2_date = ee.Date(latest_s2_image.get('system:time_start')).format('YYYY-MM-dd').getInfo()
- 
+            latest_s1_date = ee.Date(latest_s1_image.get("system:time_start"))
+
         # -------------------- DECIDE WHICH DATA TO USE --------------------
         use_s2 = False
         use_s1 = False
- 
-        if latest_s1_image and latest_s2_image:
-            if latest_s2_date >= latest_s1_date:
-                use_s2 = True
-            else:
-                use_s1 = True
-        elif latest_s2_image:
+
+        if latest_s2_date and latest_s1_date:
+            # Prefer Sentinel-2 if both available
+            use_s2 = latest_s2_date.millis().getInfo() >= latest_s1_date.millis().getInfo()
+            use_s1 = not use_s2
+        elif latest_s2_date:
             use_s2 = True
-        elif latest_s1_image:
+        elif latest_s1_date:
             use_s1 = True
         else:
             raise HTTPException(status_code=404, detail="No Sentinel-1 or Sentinel-2 images found for the given date range.")
- 
+
         # -------------------- ANALYSIS LOGIC --------------------
         if use_s2:
             analysis = latest_s2_image.normalizedDifference(["B8", "B4"]).rename("NDVI").clip(geometry)
@@ -821,6 +829,8 @@ async def analyze_plot_combined(
             stress_mask = ndvi.gte(0.0).And(ndvi.lt(0.2))
             moderate_mask = ndvi.gte(0.4).And(ndvi.lt(0.6))
             healthy_mask = ndvi.gte(0.6)
+            latest_image_date = latest_s2_date.format("YYYY-MM-dd").getInfo()
+            data_source = "Sentinel-2 NDVI"
         else:
             analysis = latest_s1_image.select("VH").clip(geometry)
             vh = analysis.select("VH")
@@ -828,7 +838,9 @@ async def analyze_plot_combined(
             stress_mask = vh.lt(-11).And(vh.gt(-13))
             moderate_mask = vh.lte(-13).And(vh.gt(-15))
             healthy_mask = vh.lte(-15)
- 
+            latest_image_date = latest_s1_date.format("YYYY-MM-dd").getInfo()
+            data_source = "Sentinel-1 VH"
+
         # -------------------- COMBINED VISUALIZATION --------------------
         combined_class = (
             ee.Image(0)
@@ -838,29 +850,30 @@ async def analyze_plot_combined(
             .where(healthy_mask, 4)
             .clip(geometry)
         )
- 
+
         combined_smooth = combined_class.focal_mean(radius=10, units="meters")
         combined_vis_params = {
             "min": 0,
             "max": 4,
-            "palette": ["#bc1e29","#58cf54","#28ae31","#056c3e"]
+            "palette": ["#bc1e29", "#58cf54", "#28ae31", "#056c3e"]
         }
         combined_smooth_vis = combined_smooth.visualize(**combined_vis_params).clip(geometry)
         tile_url = combined_smooth_vis.getMapId()["tile_fetcher"].url_format
- 
+
         # -------------------- PIXEL COUNTS --------------------
         count_image = ee.Image.constant(1)
+
         def get_pixel_count(mask):
             return count_image.updateMask(mask).reduceRegion(
                 ee.Reducer.count(), geometry, 10, bestEffort=True
             ).get("constant")
- 
+
         healthy_count = get_pixel_count(healthy_mask).getInfo() or 0
         moderate_count = get_pixel_count(moderate_mask).getInfo() or 0
         weak_count = get_pixel_count(weak_mask).getInfo() or 0
         stress_count = get_pixel_count(stress_mask).getInfo() or 0
         total_pixel_count = get_pixel_count(count_image).getInfo() or 0
- 
+
         # -------------------- PIXEL COORDINATES --------------------
         def mask_to_coords(mask):
             points = mask.selfMask().addBands(ee.Image.pixelLonLat()).sample(
@@ -868,56 +881,60 @@ async def analyze_plot_combined(
             ).getInfo()
             coords = [f["geometry"]["coordinates"] for f in points.get("features", [])]
             return [list(x) for x in {tuple(c) for c in coords}]
- 
+
         healthy_coords = mask_to_coords(healthy_mask)
         moderate_coords = mask_to_coords(moderate_mask)
         weak_coords = mask_to_coords(weak_mask)
         stress_coords = mask_to_coords(stress_mask)
- 
+
         # -------------------- RESPONSE --------------------
         feature = {
             "type": "Feature",
-            "geometry": {"type": plot_data["geom_type"], "coordinates": plot_data["original_coords"]},
+            "geometry": {
+                "type": plot_data["geom_type"],
+                "coordinates": plot_data["original_coords"]
+            },
             "properties": {
                 "plot_name": plot_name,
-                "area_acres": round(area_hectares*2.471, 2),
+                "area_acres": round(area_hectares * 2.471, 2),
                 "start_date": start_date,
                 "end_date": end_date,
                 "image_count": 1,
                 "tile_url": tile_url,
-                "data_source": "Sentinel-2 NDVI" if use_s2 else "Sentinel-1 VH",
+                "data_source": data_source,
+                "latest_image_date": latest_image_date,
                 "last_updated": datetime.now().isoformat()
             }
         }
- 
+
         return {
             "type": "FeatureCollection",
             "features": [feature],
             "pixel_summary": {
                 "total_pixel_count": total_pixel_count,
-               
+
                 "healthy_pixel_count": healthy_count,
-                "healthy_pixel_percentage": (healthy_count/total_pixel_count)*100 if total_pixel_count else 0,
+                "healthy_pixel_percentage": (healthy_count / total_pixel_count) * 100 if total_pixel_count else 0,
                 "healthy_pixel_coordinates": healthy_coords,
-               
+
                 "moderate_pixel_count": moderate_count,
-                "moderate_pixel_percentage": (moderate_count/total_pixel_count)*100 if total_pixel_count else 0,
+                "moderate_pixel_percentage": (moderate_count / total_pixel_count) * 100 if total_pixel_count else 0,
                 "moderate_pixel_coordinates": moderate_coords,
- 
+
                 "weak_pixel_count": weak_count,
-                "weak_pixel_percentage": (weak_count/total_pixel_count)*100 if total_pixel_count else 0,
+                "weak_pixel_percentage": (weak_count / total_pixel_count) * 100 if total_pixel_count else 0,
                 "weak_pixel_coordinates": weak_coords,
- 
+
                 "stress_pixel_count": stress_count,
-                "stress_pixel_percentage": (stress_count/total_pixel_count)*100 if total_pixel_count else 0,
+                "stress_pixel_percentage": (stress_count / total_pixel_count) * 100 if total_pixel_count else 0,
                 "stress_pixel_coordinates": stress_coords,
-               
+
                 "analysis_start_date": analysis_start.format("YYYY-MM-dd").getInfo(),
                 "analysis_end_date": analysis_end.format("YYYY-MM-dd").getInfo(),
-                "latest_image_date": latest_s2_date if use_s2 else latest_s1_date
+                "latest_image_date": latest_image_date
             }
         }
- 
+
     except HTTPException as he:
         raise he
     except Exception as e:

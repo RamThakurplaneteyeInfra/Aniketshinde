@@ -643,9 +643,9 @@ async def get_plot_info_with_dates(plot_name: str):
 @app.post("/analyze_Growth", response_model=Dict[str, Any])
 async def analyze_plot_combined(
     plot_name: str = Query(..., description="Name of the plot to analyze"),
-    end_date: str = Query(
-        default_factory=lambda: date.today().strftime("%Y-%m-%d"),
-        description="End date for analysis (defaults to today's date)"
+   end_date: str = Query(
+        default_factory=lambda: (date.today() + timedelta(days=1)).strftime("%Y-%m-%d"),
+        description="End date for analysis (defaults to tomorrow's date)"
     ),
     start_date: str = Depends(default_start_date)
 ):
@@ -853,7 +853,10 @@ def Water(end_date: str):
 @app.post("/wateruptake", response_model=Dict[str, Any])
 async def analyze_water_uptake(
     plot_name: str,
-    end_date: str = Query(default=date.today().strftime("%Y-%m-%d")),
+    end_date: str = Query(
+        default_factory=lambda: (date.today() + timedelta(days=1)).strftime("%Y-%m-%d"),
+        description="End date for analysis (defaults to tomorrow's date)"
+    ),
     start_date: str = Depends(
         lambda end_date=Query(default=date.today().strftime("%Y-%m-%d")): default_start_date(end_date)
     )
@@ -1058,7 +1061,10 @@ async def analyze_water_uptake(
 @app.post("/SoilMoisture", response_model=Dict[str, Any])
 async def analyze_plot_combined(
     plot_name: str,
-    end_date: str = Query(default=date.today().strftime('%Y-%m-%d')),
+    end_date: str = Query(
+        default_factory=lambda: (date.today() + timedelta(days=1)).strftime("%Y-%m-%d"),
+        description="End date for analysis (defaults to tomorrow's date)"
+    ),
     start_date: str = Depends(lambda end_date=Query(default=date.today().strftime('%Y-%m-%d')): default_start_date(end_date)),
 ):
     """
@@ -1271,7 +1277,10 @@ async def analyze_plot_combined(
 @app.post("/pest-detection", response_model=Dict[str, Any])
 async def pest_detection_combined(
     plot_name: str,
-    end_date: str = Query(default=date.today().strftime("%Y-%m-%d")),
+    end_date: str = Query(
+        default_factory=lambda: (date.today() + timedelta(days=1)).strftime("%Y-%m-%d"),
+        description="End date for analysis (defaults to tomorrow's date)"
+    ),
     start_date: str = Depends(
         lambda end_date=Query(default=date.today().strftime("%Y-%m-%d")): default_start_date(end_date)
     ),

@@ -16,6 +16,7 @@ from fastapi import FastAPI, Request
 from pydantic import BaseModel
 from shapely.geometry import shape, Point, Polygon
 from geopy.distance import geodesic
+from shared_services import PlotSyncService
 
 # Initialize Earth Engine - move this to the top
 try:
@@ -23,105 +24,6 @@ try:
     ee.Initialize(project="arctic-hybrid-462806-c9")
 except Exception as e:
     print(f"Warning: Earth Engine initialization failed: {e}")
-class PlotSyncService:
-    def _process_plots_response(self, plots_data: Dict[str, Any]) -> Dict[str, Dict]:
-        """Process the Django API response and convert to plot dictionary format"""
-        # This is a simplified version. You should copy the full implementation
-        # from main.py or another correct file to handle all geometry types.
-        plot_dict = {}
-        for plot in plots_data.get('results', []):
-            plot_id = plot.get('id')
-            gat_number = plot.get('gat_number', '')
-            plot_number = plot.get('plot_number', '')
-
-            if gat_number and plot_number:
-                plot_name = f"{gat_number}_{plot_number}"
-            elif gat_number:
-                plot_name = gat_number
-            else:
-                plot_name = f"plot_{plot_id}"
-
-            boundary = plot.get('boundary')
-            if isinstance(boundary, dict) and 'coordinates' in boundary:
-                coords = boundary['coordinates']
-                if coords:
-                    # A proper strip_z function should be used here if available
-                    coords_2d = [c[:2] for ring in coords for c in ring]
-                    try:
-                        geometry = ee.Geometry.Polygon(coords)
-                        plot_dict[plot_name] = {
-                            "geometry": geometry,
-                            "geom_type": "Polygon",
-                            "original_coords": coords,
-                            "properties": {
-                                'gat_number': gat_number,
-                                'plot_number': plot_number,
-                                'django_id': plot_id
-                            }
-                        }
-                    except Exception as e:
-                        print(f"Error creating geometry for plot {plot_id}: {e}")
-                        continue
-
-        return plot_dict
-
-    """
-    Service to fetch plot data from Django /plots/ API
-    """
-    
-    def __init__(self, django_api_url: str = "https://cropeye-server-1.onrender.com"):
-        self.django_api_url = django_api_url
-        self.plots_cache = {}
-        self.last_sync = None
-        self.cache_duration = 300  # 5 minutes cache
-    
-    def fetch_plots_from_api(self) -> Dict[str, Any]:
-        """Fetch all plots from Django API"""
-        try:
-            response = requests.get(
-                f"{self.django_api_url}/api/plots/public/",
-                headers={'Content-Type': 'application/json'},
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                plots_data = response.json()
-                return self._process_plots_response(plots_data)
-            elif response.status_code == 401:
-                print("Warning: Django API requires authentication. Using empty plot list.")
-                return {
-                    'type': 'FeatureCollection',
-                    'features': []
-                }
-            else:
-                print(f"Warning: Django API returned status {response.status_code}. Using empty plot list.")
-                return {
-                    'type': 'FeatureCollection',
-                    'features': []
-                }  
-        except requests.exceptions.RequestException as e:
-            print(f"Warning: Could not connect to Django API: {str(e)}. Using empty plot list.")
-            return {
-                'type': 'FeatureCollection',
-                'features': []
-            }
-    
-    def get_plots_dict(self, force_refresh: bool = False) -> Dict[str, Dict]:
-        """Get plots dictionary, with caching"""
-        current_time = datetime.now()
-
-        # Check if cache is valid
-        if (not force_refresh and 
-            self.last_sync and 
-            (current_time - self.last_sync).seconds < self.cache_duration and 
-            self.plots_cache):
-            return self.plots_cache
-
-        # Fetch fresh data
-        plots_data = self.fetch_plots_from_api()
-        self.plots_cache = plots_data
-        self.last_sync = current_time
-        return plots_data
 
 # Pydantic models for request/response  
 class PlotInfo(BaseModel):
@@ -214,9 +116,6 @@ class GeoJSONResponse(BaseModel):
 class DateRange(BaseModel):
     start_date: str
     end_date: str
-
-# Global variables
-plot_dict = {}
 
 # Update indexVisParams for Sentinel-1 (assuming this is correct for Admin.py)
 indexVisParams = {
@@ -1887,4 +1786,4 @@ async def refresh_from_django():
         
 
 if __name__ == "__main__":
-    uvicorn.run("Admin:app", host="0.0.0.0", port=3000, reload=True)
+    uvicorn.run("AdminNew:app", host="0.0.0.0", port=3000, reload=True)
